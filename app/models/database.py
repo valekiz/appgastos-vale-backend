@@ -1,19 +1,22 @@
 """
-Modelos SQLAlchemy y setup de base de datos SQLite.
+Modelos SQLAlchemy. Soporta PostgreSQL (producción) y SQLite (desarrollo local).
 """
 import os
-from datetime import date
-from decimal import Decimal
 
-from sqlalchemy import (
-    Boolean, Column, Date, Integer, Numeric, String, Text, create_engine
-)
+from sqlalchemy import Column, Date, Integer, Numeric, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Session
 
-DB_PATH = os.environ.get("DB_PATH", "gastos.db")
-DATABASE_URL = f"sqlite:///{DB_PATH}"
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+if DATABASE_URL:
+    # Supabase/PostgreSQL: corregir prefijo si viene como postgres://
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    engine = create_engine(DATABASE_URL)
+else:
+    # Desarrollo local: SQLite
+    DB_PATH = os.environ.get("DB_PATH", "gastos.db")
+    engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 
 
 class Base(DeclarativeBase):
