@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, and_, func
 
 from app.models.database import (
-    CartolaProcesada, MovimientoCC, get_session, init_db
+    CartolaProcesada, Categoria, MovimientoCC, get_session, init_db
 )
 from app.parsers.pdf_parser import CartolaCCParser
 from app.services.email_poller import GmailPoller
@@ -80,6 +80,10 @@ def _save_cartola(db: Session, cartola_data: dict, email_uid: str) -> int:
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
+class SetCategoriaBody(BaseModel):
+    categoria_id: int | None = None
+
+
 class CreditCardMovimiento(BaseModel):
     fecha: str
     descripcion: str
@@ -105,6 +109,38 @@ def add_credit_card_movement(body: CreditCardMovimiento, db: Session = Depends(_
     db.add(m)
     db.commit()
     return {"ok": True, "id": m.id, "fecha": body.fecha, "descripcion": body.descripcion, "monto": body.monto}
+
+
+@router.get("/categories")
+def list_categories(db: Session = Depends(_get_db)):
+    """Lista todas las categorías disponibles."""
+    cats = db.execute(select(Categoria).order_by(Categoria.id)).scalars().all()
+    return [
+        {
+            "id": c.id,
+            "nombre": c.nombre,
+            "icono": c.icono,
+            "mob_id": c.mob_id,
+            "es_gasto": c.es_gasto,
+            "color": c.color,
+        }
+        for c in cats
+    ]
+
+
+@router.patch("/movements/{mov_id}/category")
+def set_movement_category(
+    mov_id: int,
+    body: SetCategoriaBody,
+    db: Session = Depends(_get_db),
+):
+    """Asigna una categoría a un movimiento."""
+    mov = db.get(MovimientoCC, mov_id)
+    if not mov:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    mov.categoria_id = body.categoria_id
+    db.commit()
+    return {"ok": True, "id": mov_id, "categoria_id": body.categoria_id}
 
 
 @router.get("/health")
@@ -215,6 +251,9 @@ def list_movements(
 
     movs = db.execute(q.limit(limite).offset(offset)).scalars().all()
 
+    cats = db.execute(select(Categoria)).scalars().all()
+    cat_map = {c.id: c for c in cats}
+
     return {
         "total": total,
         "offset": offset,
@@ -231,6 +270,13 @@ def list_movements(
                 "sucursal": m.sucursal,
                 "numero_doc": m.numero_doc,
                 "cuenta": m.cuenta,
+                "categoria_id": m.categoria_id,
+                "categoria": {
+                    "nombre": cat_map[m.categoria_id].nombre,
+                    "icono": cat_map[m.categoria_id].icono,
+                    "color": cat_map[m.categoria_id].color,
+                    "es_gasto": cat_map[m.categoria_id].es_gasto,
+                } if m.categoria_id and m.categoria_id in cat_map else None,
             }
             for m in movs
         ],
@@ -257,19 +303,25 @@ def summary(
         .order_by(MovimientoCC.fecha)
     ).scalars().all()
 
-    total_cargos = sum(m.cargo for m in movs if m.cargo) or Decimal("0")
+    non_gasto_ids = set(
+        db.execute(select(Categoria.id).where(Categoria.es_gasto == False)).scalars().all()
+    )
+
+    # Cargos que SÍ cuentan como gasto (sin categoría cuenta como gasto por defecto)
+    cargos_gasto = [m for m in movs if m.cargo and m.categoria_id not in non_gasto_ids]
+    cargos_excluidos = [m for m in movs if m.cargo and m.categoria_id in non_gasto_ids]
+
+    total_cargos = sum(m.cargo for m in cargos_gasto) or Decimal("0")
+    total_excluido = sum(m.cargo for m in cargos_excluidos) or Decimal("0")
     total_abonos = sum(m.abono for m in movs if m.abono) or Decimal("0")
     balance = total_abonos - total_cargos
 
-    top_cargos = sorted(
-        [m for m in movs if m.cargo],
-        key=lambda m: m.cargo,
-        reverse=True,
-    )[:10]
+    top_cargos = sorted(cargos_gasto, key=lambda m: m.cargo, reverse=True)[:10]
 
     return {
         "periodo": f"{anio}-{mes:02d}",
         "total_cargos": str(total_cargos),
+        "total_excluido": str(total_excluido),
         "total_abonos": str(total_abonos),
         "balance": str(balance),
         "cantidad_movimientos": len(movs),
