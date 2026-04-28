@@ -199,6 +199,60 @@ def delete_category(cat_id: int, db: Session = Depends(_get_db)):
     return {"ok": True}
 
 
+@router.post("/movements/dedupe")
+def dedupe_movements(
+    desde: str | None = Query(None),
+    hasta: str | None = Query(None),
+    dry_run: bool = Query(False, description="Si true, solo cuenta sin borrar"),
+    db: Session = Depends(_get_db),
+):
+    """Borra duplicados (misma fecha+descripcion+monto+cuenta), conservando el id más bajo."""
+    q = select(MovimientoCC).order_by(MovimientoCC.id)
+    filters = []
+    if desde:
+        filters.append(MovimientoCC.fecha >= date.fromisoformat(desde))
+    if hasta:
+        filters.append(MovimientoCC.fecha <= date.fromisoformat(hasta))
+    if filters:
+        q = q.where(and_(*filters))
+    movs = db.execute(q).scalars().all()
+
+    seen: dict = {}
+    to_delete: list = []
+    for m in movs:
+        key = (m.fecha.isoformat(), m.descripcion, str(m.monto), m.cuenta)
+        if key in seen:
+            to_delete.append(m)
+        else:
+            seen[key] = m.id
+
+    deleted_ids = [m.id for m in to_delete]
+    if not dry_run:
+        for m in to_delete:
+            db.delete(m)
+        db.commit()
+
+    return {
+        "scanned": len(movs),
+        "duplicates_removed": len(deleted_ids),
+        "deleted_ids": deleted_ids[:50],
+        "dry_run": dry_run,
+    }
+
+
+@router.delete("/cartolas/{cartola_id}")
+def delete_cartola(cartola_id: int, db: Session = Depends(_get_db)):
+    """Borra una cartola y todos sus movimientos."""
+    cp = db.get(CartolaProcesada, cartola_id)
+    if not cp:
+        raise HTTPException(status_code=404, detail="Cartola no encontrada")
+    movs = db.execute(select(MovimientoCC).where(MovimientoCC.cartola_id == cartola_id)).scalars().all()
+    for m in movs: db.delete(m)
+    db.delete(cp)
+    db.commit()
+    return {"ok": True, "cartola_id": cartola_id, "movs_deleted": len(movs)}
+
+
 @router.patch("/movements/{mov_id}/category")
 def set_movement_category(
     mov_id: int,
@@ -404,6 +458,7 @@ def list_movements(
                 "sucursal": m.sucursal,
                 "numero_doc": m.numero_doc,
                 "cuenta": m.cuenta,
+                "cartola_id": m.cartola_id,
                 "categoria_id": m.categoria_id,
                 "categoria": {
                     "nombre": cat_map[m.categoria_id].nombre,
