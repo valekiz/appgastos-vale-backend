@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import select, and_, func
 
@@ -78,6 +79,33 @@ def _save_cartola(db: Session, cartola_data: dict, email_uid: str) -> int:
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
+
+class CreditCardMovimiento(BaseModel):
+    fecha: str
+    descripcion: str
+    monto: int
+    tipo: str = "cargo"
+    cuenta: str = "tarjeta-credito"
+
+
+@router.post("/movements/credit-card")
+def add_credit_card_movement(body: CreditCardMovimiento, db: Session = Depends(_get_db)):
+    """Agrega un movimiento de tarjeta de crédito manualmente o desde Atajo de iOS."""
+    m = MovimientoCC(
+        cartola_id=0,
+        fecha=date.fromisoformat(body.fecha),
+        descripcion=body.descripcion,
+        cargo=body.monto if body.tipo == "cargo" else None,
+        abono=body.monto if body.tipo == "abono" else None,
+        monto=-body.monto if body.tipo == "cargo" else body.monto,
+        sucursal=None,
+        numero_doc=None,
+        cuenta=body.cuenta,
+    )
+    db.add(m)
+    db.commit()
+    return {"ok": True, "id": m.id, "fecha": body.fecha, "descripcion": body.descripcion, "monto": body.monto}
+
 
 @router.get("/health")
 def health():
