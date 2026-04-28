@@ -442,41 +442,53 @@ def summary(
     )
 
     # Cargos que SÍ cuentan como gasto (sin categoría cuenta como gasto por defecto)
-    cargos_gasto = [m for m in movs if m.cargo and m.categoria_id not in non_gasto_ids]
+    cargos_gasto    = [m for m in movs if m.cargo and m.categoria_id not in non_gasto_ids]
     cargos_excluidos = [m for m in movs if m.cargo and m.categoria_id in non_gasto_ids]
+    # Abonos que reducen el gasto (reembolsos, devoluciones — excluye no-gasto)
+    abonos_gasto    = [m for m in movs if m.abono and m.categoria_id not in non_gasto_ids]
 
-    total_cargos = sum(m.cargo for m in cargos_gasto) or Decimal("0")
+    total_cargos  = sum(m.cargo for m in cargos_gasto)  or Decimal("0")
     total_excluido = sum(m.cargo for m in cargos_excluidos) or Decimal("0")
-    # Solo abonos en categorías gasto (o sin categoría) reducen el gasto neto
-    total_abonos = sum(m.abono for m in movs if m.abono and m.categoria_id not in non_gasto_ids) or Decimal("0")
-    gasto_neto = total_cargos - total_abonos
+    total_abonos  = sum(m.abono for m in abonos_gasto)  or Decimal("0")
+    gasto_neto    = total_cargos - total_abonos
 
     top_cargos = sorted(cargos_gasto, key=lambda m: m.cargo, reverse=True)[:10]
 
-    # Breakdown por categoría
+    # Breakdown por categoría (neto = cargos - abonos de esa categoría)
     cats_all = {c.id: c for c in db.execute(select(Categoria)).scalars().all()}
     cat_totals: dict = {}
+
+    def _init_cat(key):
+        cat = cats_all.get(key) if key else None
+        cat_totals[key] = {
+            "categoria_id": key,
+            "nombre": cat.nombre if cat else "Sin categoría",
+            "icono":  cat.icono  if cat else "❓",
+            "mob_id": cat.mob_id if cat else None,
+            "color":  cat.color  if cat else "#888888",
+            "total":  Decimal("0"),
+            "count":  0,
+        }
+
     for m in cargos_gasto:
-        key = m.categoria_id  # None = sin categoría
+        key = m.categoria_id
         if key not in cat_totals:
-            cat = cats_all.get(key) if key else None
-            cat_totals[key] = {
-                "categoria_id": key,
-                "nombre": cat.nombre if cat else "Sin categoría",
-                "icono": cat.icono if cat else "❓",
-                "mob_id": cat.mob_id if cat else None,
-                "color": cat.color if cat else "#888888",
-                "total": Decimal("0"),
-                "count": 0,
-            }
+            _init_cat(key)
         cat_totals[key]["total"] += m.cargo
         cat_totals[key]["count"] += 1
+
+    for m in abonos_gasto:
+        key = m.categoria_id
+        if key not in cat_totals:
+            _init_cat(key)
+        cat_totals[key]["total"] -= m.abono
 
     by_category = sorted(
         [
             {**{k: v for k, v in entry.items() if k != "total"},
              "total": str(entry["total"])}
             for entry in cat_totals.values()
+            if entry["total"] > 0
         ],
         key=lambda x: int(x["total"]),
         reverse=True,
