@@ -298,7 +298,7 @@ class ImportMovimientosBody(BaseModel):
 @router.post("/import-movements")
 def import_movements(body: ImportMovimientosBody, db: Session = Depends(_get_db)):
     """Importa movimientos pre-parseados (sin PDF). Evita timeout en servidores con poca RAM."""
-    uid = f"import_{body.cuenta}_{body.periodo}_{datetime.utcnow().isoformat()}"
+    uid = f"import_{body.cuenta}_{body.periodo}_{datetime.utcnow().isoformat()}"[:64]
     cartola_id = _save_cartola(db, body.model_dump(), uid)
     return {
         "cartola_id": cartola_id,
