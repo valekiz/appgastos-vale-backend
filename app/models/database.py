@@ -87,6 +87,8 @@ _CATEGORIAS_DEFAULT = [
     dict(nombre="Vestuario",       icono="👔", mob_id=None,    es_gasto=True,  color="#ffaa44", es_sistema=True),
     dict(nombre="Educación",       icono="📚", mob_id=None,    es_gasto=True,  color="#44ddff", es_sistema=True),
     dict(nombre="Deporte",         icono="🏓", mob_id=None,    es_gasto=True,  color="#00bbff", es_sistema=True),
+    dict(nombre="Banco",           icono="🏦", mob_id=None,    es_gasto=True,  color="#5599ff", es_sistema=True),
+    dict(nombre="Regalos",        icono="🎁", mob_id=None,    es_gasto=True,  color="#ff66aa", es_sistema=True),
     dict(nombre="Otro",            icono="❓", mob_id=None,    es_gasto=True,  color="#888888", es_sistema=True),
     dict(nombre="Inversión",       icono="💰", mob_id=9300003, es_gasto=False, color="#ffd700", es_sistema=True),
     dict(nombre="Por Cobrar",      icono="🤝", mob_id=8820001, es_gasto=False, color="#88ff88", es_sistema=True),
@@ -101,7 +103,9 @@ _CATEGORIAS_UPDATES = [
 
 # Categorías nuevas que se agregan si no existen
 _CATEGORIAS_NUEVAS = [
-    dict(nombre="Deporte", icono="🏓", mob_id=None, es_gasto=True, color="#00bbff", es_sistema=True),
+    dict(nombre="Deporte",  icono="🏓", mob_id=None, es_gasto=True, color="#00bbff", es_sistema=True),
+    dict(nombre="Banco",    icono="🏦", mob_id=None, es_gasto=True, color="#5599ff", es_sistema=True),
+    dict(nombre="Regalos",  icono="🎁", mob_id=None, es_gasto=True, color="#ff66aa", es_sistema=True),
 ]
 
 
