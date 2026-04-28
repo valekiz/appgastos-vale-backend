@@ -7,6 +7,7 @@ GET  /summary       — resumen del mes (totales, top gastos)
 GET  /health        — healthcheck para Railway
 """
 import logging
+from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -425,3 +426,59 @@ def yearly_summary(
             for i in range(1, 13)
         ],
     }
+
+
+@router.get("/summary/yearly/categories")
+def yearly_category_breakdown(
+    anio: int = Query(default=date.today().year),
+    db: Session = Depends(_get_db),
+):
+    """Desglose por categoría y mes para gráfico de barras apiladas."""
+    non_gasto_ids = set(
+        db.execute(select(Categoria.id).where(Categoria.es_gasto == False)).scalars().all()
+    )
+    cats_all = {c.id: c for c in db.execute(select(Categoria)).scalars().all()}
+
+    movs = db.execute(
+        select(MovimientoCC)
+        .where(
+            MovimientoCC.fecha >= date(anio, 1, 1),
+            MovimientoCC.fecha < date(anio + 1, 1, 1),
+            MovimientoCC.cargo != None,
+        )
+    ).scalars().all()
+
+    monthly: dict[int, dict] = {i: defaultdict(lambda: Decimal("0")) for i in range(1, 13)}
+    for m in movs:
+        if m.categoria_id not in non_gasto_ids:
+            monthly[m.fecha.month][m.categoria_id] += m.cargo
+
+    all_cat_ids: set = set()
+    for month_data in monthly.values():
+        all_cat_ids.update(month_data.keys())
+
+    cats_info = {
+        str(cid): {
+            "nombre": cats_all[cid].nombre if cid and cid in cats_all else "Sin cat",
+            "color":  cats_all[cid].color  if cid and cid in cats_all else "#888888",
+            "icono":  cats_all[cid].icono  if cid and cid in cats_all else "❓",
+        }
+        for cid in all_cat_ids
+    }
+
+    meses_data = []
+    for i in range(1, 13):
+        segs = [
+            {"categoria_id": cid, "total": str(total)}
+            for cid, total in monthly[i].items()
+            if total > 0
+        ]
+        segs.sort(key=lambda x: int(x["total"]), reverse=True)
+        meses_data.append({
+            "mes": i,
+            "nombre": _MESES_ES[i],
+            "total": str(sum(monthly[i].values()) or Decimal("0")),
+            "categorias": segs,
+        })
+
+    return {"anio": anio, "categorias": cats_info, "meses": meses_data}
