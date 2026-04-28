@@ -12,6 +12,9 @@ if DATABASE_URL:
     # Supabase/PostgreSQL: corregir prefijo si viene como postgres://
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    # Supabase requiere SSL
+    if "supabase.co" in DATABASE_URL and "sslmode" not in DATABASE_URL:
+        DATABASE_URL += "?sslmode=require"
     engine = create_engine(DATABASE_URL)
 else:
     # Desarrollo local: SQLite
