@@ -30,8 +30,13 @@ app.include_router(router, prefix="/api/v1")
 
 @app.on_event("startup")
 def startup():
-    init_db()
-    logging.getLogger(__name__).info("Base de datos inicializada")
+    try:
+        init_db()
+        logging.getLogger(__name__).info("Base de datos inicializada")
+    except Exception as exc:
+        logging.getLogger(__name__).error("Error inicializando DB: %s", exc)
+        # No tumbar el proceso: Render health-check pasa y los requests
+        # que toquen la DB fallarán individualmente con 500.
 
 
 if __name__ == "__main__":
