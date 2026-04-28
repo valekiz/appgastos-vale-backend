@@ -15,12 +15,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, or_, func
 
 from app.models.database import (
     CartolaProcesada, Categoria, MovimientoCC, get_session, init_db
 )
-from app.parsers.pdf_parser import CartolaCCParser
+from app.parsers.pdf_parser import CartolaCCParser, CartolaTCParser
 from app.services.email_poller import GmailPoller
 
 logger = logging.getLogger(__name__)
@@ -222,7 +222,7 @@ def health():
 @router.post("/sync")
 def sync_from_email(db: Session = Depends(_get_db)):
     """
-    Lee Gmail, descarga PDFs de cartolas nuevos y los parsea.
+    Lee Gmail, descarga PDFs de cartolas CC y TC nuevos y los parsea.
     Requiere env vars: GMAIL_USER, GMAIL_APP_PASS, PDF_RUT.
     """
     import os
@@ -230,30 +230,58 @@ def sync_from_email(db: Session = Depends(_get_db)):
     if not rut:
         raise HTTPException(status_code=500, detail="PDF_RUT no configurado")
 
+    procesados = []
+
+    # ── Cartola CC ────────────────────────────────────────────────────────────
     try:
-        poller = GmailPoller()
-        cartolas_raw = poller.fetch_new()
+        cc_poller = GmailPoller()
+        cc_raws = cc_poller.fetch_new()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error conectando a Gmail: {exc}")
 
-    parser = CartolaCCParser(rut=rut)
-    procesados = []
-
-    for raw in cartolas_raw:
+    cc_parser = CartolaCCParser(rut=rut)
+    for raw in cc_raws:
         try:
-            cartola = parser.parse(raw.pdf_bytes)
+            cartola = cc_parser.parse(raw.pdf_bytes)
             cartola_id = _save_cartola(db, cartola.to_dict(), raw.uid)
-            poller.mark_processed(raw.uid)
+            cc_poller.mark_processed(raw.uid)
             procesados.append({
                 "uid": raw.uid,
+                "tipo": "cc",
                 "periodo": cartola.periodo,
                 "movimientos": len(cartola.movimientos),
                 "cartola_id": cartola_id,
             })
-            logger.info("Cartola procesada: %s (%d mov)", cartola.periodo, len(cartola.movimientos))
+            logger.info("Cartola CC procesada: %s (%d mov)", cartola.periodo, len(cartola.movimientos))
         except Exception as exc:
-            logger.error("Error procesando cartola UID %s: %s", raw.uid, exc)
-            procesados.append({"uid": raw.uid, "error": str(exc)})
+            logger.error("Error procesando cartola CC UID %s: %s", raw.uid, exc)
+            procesados.append({"uid": raw.uid, "tipo": "cc", "error": str(exc)})
+
+    # ── Estado TC ─────────────────────────────────────────────────────────────
+    try:
+        tc_poller = GmailPoller(subject_filter="Estado de Cuenta Tarjeta de Crédito")
+        tc_raws = tc_poller.fetch_new()
+    except Exception as exc:
+        logger.error("Error buscando emails TC: %s", exc)
+        tc_raws = []
+
+    tc_parser = CartolaTCParser(rut=rut)
+    for raw in tc_raws:
+        try:
+            cartola = tc_parser.parse(raw.pdf_bytes)
+            cartola_id = _save_cartola(db, cartola.to_dict(), raw.uid)
+            tc_poller.mark_processed(raw.uid)
+            procesados.append({
+                "uid": raw.uid,
+                "tipo": "tc",
+                "periodo": cartola.periodo,
+                "movimientos": len(cartola.movimientos),
+                "cartola_id": cartola_id,
+            })
+            logger.info("Estado TC procesado: %s (%d mov)", cartola.periodo, len(cartola.movimientos))
+        except Exception as exc:
+            logger.error("Error procesando estado TC UID %s: %s", raw.uid, exc)
+            procesados.append({"uid": raw.uid, "tipo": "tc", "error": str(exc)})
 
     return {"procesados": procesados, "total": len(procesados)}
 
@@ -262,21 +290,23 @@ def sync_from_email(db: Session = Depends(_get_db)):
 async def upload_pdf(
     pdf: UploadFile = File(...),
     rut: str = Query(..., description="RUT sin guion ni DV, ej: 19322966"),
+    tipo: str = Query("cc", description="'cc' cuenta corriente, 'tc' tarjeta de crédito"),
     db: Session = Depends(_get_db),
 ):
-    """Carga manual de un PDF de cartola (útil para testing y primer uso)."""
+    """Carga manual de un PDF de cartola o estado TC (útil para testing y carga histórica)."""
     pdf_bytes = await pdf.read()
-    parser = CartolaCCParser(rut=rut)
+    parser = CartolaTCParser(rut=rut) if tipo == "tc" else CartolaCCParser(rut=rut)
     try:
         cartola = parser.parse(pdf_bytes)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Error parseando PDF: {exc}")
 
-    uid = f"manual_{pdf.filename}_{datetime.utcnow().isoformat()}"
+    uid = f"manual_{tipo}_{pdf.filename}_{datetime.utcnow().isoformat()}"
     cartola_id = _save_cartola(db, cartola.to_dict(), uid)
 
     return {
         "cartola_id": cartola_id,
+        "tipo": tipo,
         "periodo": cartola.periodo,
         "cuenta": cartola.cuenta,
         "titular": cartola.titular,
@@ -312,9 +342,9 @@ def list_movements(
     elif tipo == "abono":
         filters.append(MovimientoCC.abono != None)
     if cuenta == "cc":
-        filters.append(MovimientoCC.cartola_id != 0)
+        filters.append(~MovimientoCC.cuenta.in_(['apple-pay', 'tarjeta-credito']))
     elif cuenta == "tc":
-        filters.append(MovimientoCC.cartola_id == 0)
+        filters.append(MovimientoCC.cuenta.in_(['apple-pay', 'tarjeta-credito']))
     if buscar:
         filters.append(MovimientoCC.descripcion.ilike(f"%{buscar}%"))
 

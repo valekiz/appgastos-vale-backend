@@ -366,3 +366,175 @@ class CartolaCCParser:
             sucursal=sucursal,
             numero_doc=numero_doc if numero_doc and numero_doc.strip() else None,
         )
+
+
+# ── TC Parser ─────────────────────────────────────────────────────────────────
+
+_TC_DATE_RE   = re.compile(r'\b(\d{2}/\d{2}/\d{4})\b')
+_TC_AMOUNT_RE = re.compile(r'\$\s*-?([\d.]+)\s*$')
+_TC_PERIODO_RE = re.compile(r'PERIODO\s+FACTURADO', re.IGNORECASE)
+_TC_STUB_RE   = re.compile(r'CUP[OÓ]N\s+DE\s+PAGO', re.IGNORECASE)
+
+# Lines that start with these are totals/summaries, not transactions
+_TC_SUMMARY_STARTS = (
+    'TOTAL ', 'SALDO ', 'MONTO M', 'SUBTOTAL',
+)
+
+# Any of these anywhere in the combined text → treat as abono
+_ABONO_KEYWORDS = ('MONTO CANCELADO', 'NOTA DE CREDITO', 'NOTA DE CRÉDITO', 'NOTA CRÉDITO')
+
+
+class CartolaTCParser:
+    """
+    Parsea estados de cuenta de Tarjeta de Crédito Santander Chile.
+
+    Formato de línea de transacción: LUGAR DD/MM/YYYY DESCRIPCION $ MONTO
+
+    Uso:
+        parser = CartolaTCParser(rut="19322966")
+        cartola = parser.parse(pdf_bytes)
+        cartola = parser.parse_file("/path/to/file.pdf")
+    """
+
+    def __init__(self, rut: str):
+        self.rut = re.sub(r'[^0-9]', '', rut)
+
+    def parse(self, pdf_bytes: bytes) -> CartolaMensual:
+        decrypted = _decrypt_pdf(pdf_bytes, self.rut)
+        return self._extract(decrypted)
+
+    def parse_file(self, path: str) -> CartolaMensual:
+        with open(path, 'rb') as f:
+            return self.parse(f.read())
+
+    # ── extracción principal ──────────────────────────────────────────────────
+
+    def _extract(self, pdf_bytes: bytes) -> CartolaMensual:
+        all_lines: list[str] = []
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ''
+                all_lines.extend(text.split('\n'))
+
+        desde, hasta = self._extract_periodo(all_lines)
+        titular = self._extract_titular(all_lines)
+        movimientos = self._parse_movimientos(all_lines)
+        movimientos = self._dedup(movimientos)
+
+        if hasta:
+            mes_nombre = [k for k, v in _MESES.items() if v == hasta.month]
+            periodo = f"{mes_nombre[0].capitalize()} {hasta.year}" if mes_nombre else str(hasta)
+        else:
+            periodo = "Desconocido"
+
+        return CartolaMensual(
+            periodo=periodo,
+            desde=desde,
+            hasta=hasta,
+            cuenta='tarjeta-credito',
+            titular=titular,
+            movimientos=movimientos,
+        )
+
+    # ── metadata ──────────────────────────────────────────────────────────────
+
+    def _extract_periodo(self, lines: list[str]) -> tuple[Optional[date], Optional[date]]:
+        for line in lines:
+            if _TC_PERIODO_RE.search(line):
+                dates = re.findall(r'\d{2}/\d{2}/\d{4}', line)
+                if len(dates) >= 2:
+                    return _parse_fecha_full(dates[0]), _parse_fecha_full(dates[1])
+        # Fallback: first line with two adjacent dates
+        for line in lines:
+            dates = re.findall(r'\d{2}/\d{2}/\d{4}', line)
+            if len(dates) >= 2:
+                d1, d2 = _parse_fecha_full(dates[0]), _parse_fecha_full(dates[1])
+                if d1 and d2 and 2000 <= d2.year <= 2100:
+                    return d1, d2
+        return None, None
+
+    def _extract_titular(self, lines: list[str]) -> str:
+        for i, line in enumerate(lines):
+            if 'TITULAR' in line.upper():
+                m = re.search(r'TITULAR[:\s]+([A-ZÁÉÍÓÚÑ\s]{5,})', line, re.IGNORECASE)
+                if m:
+                    return m.group(1).strip().title()
+                if i + 1 < len(lines):
+                    nxt = lines[i + 1].strip()
+                    if re.match(r'^[A-ZÁÉÍÓÚÑ\s]{5,}$', nxt):
+                        return nxt.title()
+        return 'Desconocido'
+
+    # ── movimientos ────────────────────────────────────────────────────────────
+
+    def _parse_movimientos(self, lines: list[str]) -> list[Movimiento]:
+        movimientos: list[Movimiento] = []
+        in_stub = False
+        for line in lines:
+            s = line.strip()
+            if not s:
+                continue
+            # Detect and skip payment stub section
+            if _TC_STUB_RE.search(s):
+                in_stub = True
+            if in_stub:
+                continue
+            # Skip period header (contains dates but is not a transaction)
+            if _TC_PERIODO_RE.search(s):
+                continue
+            # Skip lines with no date — headers, totals, etc.
+            if not _TC_DATE_RE.search(s):
+                continue
+            # Skip summary/total lines that happen to have a date
+            upper = s.upper()
+            if any(upper.startswith(pat) for pat in _TC_SUMMARY_STARTS):
+                continue
+            mov = self._parse_line(s)
+            if mov:
+                movimientos.append(mov)
+        return movimientos
+
+    def _parse_line(self, line: str) -> Optional[Movimiento]:
+        date_m = _TC_DATE_RE.search(line)
+        if not date_m:
+            return None
+        fecha = _parse_fecha_full(date_m.group(1))
+        if not fecha:
+            return None
+
+        before = line[:date_m.start()].strip()   # LUGAR
+        after  = line[date_m.end():].strip()       # DESCRIPCION $ MONTO
+
+        # Amount must be at the end: $ MONTO
+        amount_m = _TC_AMOUNT_RE.search(after)
+        if not amount_m:
+            return None
+
+        cargo_val = _parse_monto(amount_m.group(1))
+        if not cargo_val:
+            return None
+
+        desc_part = after[:amount_m.start()].strip()
+        full_text = f"{before} {desc_part}".strip() if before else desc_part
+        if not full_text or full_text.startswith('$'):
+            return None
+
+        is_abono = any(kw in full_text.upper() for kw in _ABONO_KEYWORDS)
+
+        return Movimiento(
+            fecha=fecha,
+            descripcion=full_text,
+            cargo=None if is_abono else cargo_val,
+            abono=cargo_val if is_abono else None,
+            saldo=None,
+        )
+
+    def _dedup(self, movimientos: list[Movimiento]) -> list[Movimiento]:
+        seen: set[tuple] = set()
+        result = []
+        for m in movimientos:
+            key = (m.fecha, m.descripcion.upper(), m.cargo, m.abono)
+            if key not in seen:
+                seen.add(key)
+                result.append(m)
+        return result
