@@ -128,6 +128,37 @@ def list_categories(db: Session = Depends(_get_db)):
     ]
 
 
+class CreateCategoriaBody(BaseModel):
+    nombre: str
+    icono: str = "❓"
+    mob_id: int | None = None
+    es_gasto: bool = True
+    color: str = "#888888"
+
+
+@router.post("/categories")
+def create_category(body: CreateCategoriaBody, db: Session = Depends(_get_db)):
+    """Crea una categoría personalizada."""
+    cat = Categoria(
+        nombre=body.nombre,
+        icono=body.icono,
+        mob_id=body.mob_id,
+        es_gasto=body.es_gasto,
+        color=body.color,
+        es_sistema=False,
+    )
+    db.add(cat)
+    db.commit()
+    return {
+        "id": cat.id,
+        "nombre": cat.nombre,
+        "icono": cat.icono,
+        "mob_id": cat.mob_id,
+        "es_gasto": cat.es_gasto,
+        "color": cat.color,
+    }
+
+
 @router.patch("/movements/{mov_id}/category")
 def set_movement_category(
     mov_id: int,
