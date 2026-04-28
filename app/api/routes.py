@@ -318,19 +318,79 @@ def summary(
 
     top_cargos = sorted(cargos_gasto, key=lambda m: m.cargo, reverse=True)[:10]
 
+    # Breakdown por categoría
+    cats_all = {c.id: c for c in db.execute(select(Categoria)).scalars().all()}
+    cat_totals: dict = {}
+    for m in cargos_gasto:
+        key = m.categoria_id  # None = sin categoría
+        if key not in cat_totals:
+            cat = cats_all.get(key) if key else None
+            cat_totals[key] = {
+                "categoria_id": key,
+                "nombre": cat.nombre if cat else "Sin categoría",
+                "icono": cat.icono if cat else "❓",
+                "mob_id": cat.mob_id if cat else None,
+                "color": cat.color if cat else "#888888",
+                "total": Decimal("0"),
+                "count": 0,
+            }
+        cat_totals[key]["total"] += m.cargo
+        cat_totals[key]["count"] += 1
+
+    by_category = sorted(
+        [
+            {**{k: v for k, v in entry.items() if k != "total"},
+             "total": str(entry["total"])}
+            for entry in cat_totals.values()
+        ],
+        key=lambda x: int(x["total"]),
+        reverse=True,
+    )
+
     return {
         "periodo": f"{anio}-{mes:02d}",
         "total_cargos": str(total_cargos),
         "total_excluido": str(total_excluido),
-        "total_abonos": str(total_abonos),
-        "balance": str(balance),
-        "cantidad_movimientos": len(movs),
+        "cantidad_movimientos": len([m for m in movs if m.cargo]),
+        "by_category": by_category,
         "top_10_gastos": [
-            {
-                "fecha": m.fecha.isoformat(),
-                "descripcion": m.descripcion,
-                "monto": str(m.cargo),
-            }
+            {"fecha": m.fecha.isoformat(), "descripcion": m.descripcion, "monto": str(m.cargo)}
             for m in top_cargos
+        ],
+    }
+
+
+_MESES_ES = ["", "Ene", "Feb", "Mar", "Abr", "May", "Jun",
+             "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+
+
+@router.get("/summary/yearly")
+def yearly_summary(
+    anio: int = Query(default=date.today().year),
+    db: Session = Depends(_get_db),
+):
+    """Totales de gasto mes a mes para un año."""
+    non_gasto_ids = set(
+        db.execute(select(Categoria.id).where(Categoria.es_gasto == False)).scalars().all()
+    )
+    movs = db.execute(
+        select(MovimientoCC)
+        .where(
+            MovimientoCC.fecha >= date(anio, 1, 1),
+            MovimientoCC.fecha < date(anio + 1, 1, 1),
+            MovimientoCC.cargo != None,
+        )
+    ).scalars().all()
+
+    totales: dict[int, Decimal] = {i: Decimal("0") for i in range(1, 13)}
+    for m in movs:
+        if m.categoria_id not in non_gasto_ids:
+            totales[m.fecha.month] += m.cargo
+
+    return {
+        "anio": anio,
+        "meses": [
+            {"mes": i, "nombre": _MESES_ES[i], "total": str(totales[i])}
+            for i in range(1, 13)
         ],
     }
