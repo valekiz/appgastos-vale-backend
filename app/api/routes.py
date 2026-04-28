@@ -347,6 +347,7 @@ def list_movements(
     tipo: str | None = Query(None, description="'cargo' o 'abono'"),
     cuenta: str | None = Query(None, description="'cc' cuenta corriente, 'tc' tarjeta"),
     buscar: str | None = Query(None, description="Texto en descripcion"),
+    categoria_id: int | None = Query(None, description="ID de categoría (0 = sin categoría)"),
     limite: int = Query(200, le=1000),
     offset: int = Query(0),
     db: Session = Depends(_get_db),
@@ -369,6 +370,11 @@ def list_movements(
         filters.append(MovimientoCC.cuenta.in_(['apple-pay', 'tarjeta-credito']))
     if buscar:
         filters.append(MovimientoCC.descripcion.ilike(f"%{buscar}%"))
+    if categoria_id is not None:
+        if categoria_id == 0:
+            filters.append(MovimientoCC.categoria_id == None)
+        else:
+            filters.append(MovimientoCC.categoria_id == categoria_id)
 
     if filters:
         q = q.where(and_(*filters))
@@ -441,8 +447,9 @@ def summary(
 
     total_cargos = sum(m.cargo for m in cargos_gasto) or Decimal("0")
     total_excluido = sum(m.cargo for m in cargos_excluidos) or Decimal("0")
-    total_abonos = sum(m.abono for m in movs if m.abono) or Decimal("0")
-    balance = total_abonos - total_cargos
+    # Solo abonos en categorías gasto (o sin categoría) reducen el gasto neto
+    total_abonos = sum(m.abono for m in movs if m.abono and m.categoria_id not in non_gasto_ids) or Decimal("0")
+    gasto_neto = total_cargos - total_abonos
 
     top_cargos = sorted(cargos_gasto, key=lambda m: m.cargo, reverse=True)[:10]
 
@@ -478,6 +485,8 @@ def summary(
     return {
         "periodo": f"{anio}-{mes:02d}",
         "total_cargos": str(total_cargos),
+        "total_abonos": str(total_abonos),
+        "gasto_neto": str(gasto_neto),
         "total_excluido": str(total_excluido),
         "cantidad_movimientos": len([m for m in movs if m.cargo]),
         "by_category": by_category,
