@@ -518,7 +518,7 @@ def yearly_summary(
     anio: int = Query(default=date.today().year),
     db: Session = Depends(_get_db),
 ):
-    """Totales de gasto mes a mes para un año."""
+    """Totales de gasto mes a mes para un año (neto = cargos - abonos, excluyendo no-gasto)."""
     non_gasto_ids = set(
         db.execute(select(Categoria.id).where(Categoria.es_gasto == False)).scalars().all()
     )
@@ -527,19 +527,21 @@ def yearly_summary(
         .where(
             MovimientoCC.fecha >= date(anio, 1, 1),
             MovimientoCC.fecha < date(anio + 1, 1, 1),
-            MovimientoCC.cargo != None,
         )
     ).scalars().all()
 
     totales: dict[int, Decimal] = {i: Decimal("0") for i in range(1, 13)}
     for m in movs:
         if m.categoria_id not in non_gasto_ids:
-            totales[m.fecha.month] += m.cargo
+            if m.cargo:
+                totales[m.fecha.month] += m.cargo
+            elif m.abono:
+                totales[m.fecha.month] -= m.abono
 
     return {
         "anio": anio,
         "meses": [
-            {"mes": i, "nombre": _MESES_ES[i], "total": str(totales[i])}
+            {"mes": i, "nombre": _MESES_ES[i], "total": str(max(totales[i], Decimal("0")))}
             for i in range(1, 13)
         ],
     }
@@ -561,14 +563,16 @@ def yearly_category_breakdown(
         .where(
             MovimientoCC.fecha >= date(anio, 1, 1),
             MovimientoCC.fecha < date(anio + 1, 1, 1),
-            MovimientoCC.cargo != None,
         )
     ).scalars().all()
 
     monthly: dict[int, dict] = {i: defaultdict(lambda: Decimal("0")) for i in range(1, 13)}
     for m in movs:
         if m.categoria_id not in non_gasto_ids:
-            monthly[m.fecha.month][m.categoria_id] += m.cargo
+            if m.cargo:
+                monthly[m.fecha.month][m.categoria_id] += m.cargo
+            elif m.abono:
+                monthly[m.fecha.month][m.categoria_id] -= m.abono
 
     all_cat_ids: set = set()
     for month_data in monthly.values():
@@ -591,10 +595,11 @@ def yearly_category_breakdown(
             if total > 0
         ]
         segs.sort(key=lambda x: int(x["total"]), reverse=True)
+        month_total = sum(monthly[i].values()) or Decimal("0")
         meses_data.append({
             "mes": i,
             "nombre": _MESES_ES[i],
-            "total": str(sum(monthly[i].values()) or Decimal("0")),
+            "total": str(max(month_total, Decimal("0"))),
             "categorias": segs,
         })
 
