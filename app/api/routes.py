@@ -286,6 +286,28 @@ def sync_from_email(db: Session = Depends(_get_db)):
     return {"procesados": procesados, "total": len(procesados)}
 
 
+class ImportMovimientosBody(BaseModel):
+    periodo: str
+    desde: str | None = None
+    hasta: str | None = None
+    cuenta: str = "tarjeta-credito"
+    titular: str = "Desconocido"
+    movimientos: list[dict]
+
+
+@router.post("/import-movements")
+def import_movements(body: ImportMovimientosBody, db: Session = Depends(_get_db)):
+    """Importa movimientos pre-parseados (sin PDF). Evita timeout en servidores con poca RAM."""
+    uid = f"import_{body.cuenta}_{body.periodo}_{datetime.utcnow().isoformat()}"
+    cartola_id = _save_cartola(db, body.model_dump(), uid)
+    return {
+        "cartola_id": cartola_id,
+        "periodo": body.periodo,
+        "cuenta": body.cuenta,
+        "total_movimientos": len(body.movimientos),
+    }
+
+
 @router.post("/upload-pdf")
 async def upload_pdf(
     pdf: UploadFile = File(...),
