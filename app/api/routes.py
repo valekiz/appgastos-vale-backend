@@ -160,6 +160,21 @@ def create_category(body: CreateCategoriaBody, db: Session = Depends(_get_db)):
     }
 
 
+@router.delete("/categories/{cat_id}")
+def delete_category(cat_id: int, db: Session = Depends(_get_db)):
+    """Elimina una categoría personalizada y desasigna sus movimientos."""
+    cat = db.get(Categoria, cat_id)
+    if not cat:
+        raise HTTPException(status_code=404, detail="Categoría no encontrada")
+    if cat.es_sistema:
+        raise HTTPException(status_code=400, detail="No se puede eliminar una categoría del sistema")
+    for m in db.execute(select(MovimientoCC).where(MovimientoCC.categoria_id == cat_id)).scalars().all():
+        m.categoria_id = None
+    db.delete(cat)
+    db.commit()
+    return {"ok": True}
+
+
 @router.patch("/movements/{mov_id}/category")
 def set_movement_category(
     mov_id: int,
