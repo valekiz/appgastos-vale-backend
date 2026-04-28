@@ -93,23 +93,47 @@ class CreditCardMovimiento(BaseModel):
     cuenta: str = "tarjeta-credito"
 
 
+class ApplePayMovimiento(BaseModel):
+    descripcion: str
+    monto: float          # iOS Shortcuts manda el monto como número
+    fecha: str | None = None   # opcional — si no viene, usa hoy
+    cuenta: str = "apple-pay"
+
+
 @router.post("/movements/credit-card")
 def add_credit_card_movement(body: CreditCardMovimiento, db: Session = Depends(_get_db)):
-    """Agrega un movimiento de tarjeta de crédito manualmente o desde Atajo de iOS."""
+    """Agrega un movimiento de tarjeta de crédito manualmente."""
+    monto_abs = abs(body.monto)
     m = MovimientoCC(
         cartola_id=0,
         fecha=date.fromisoformat(body.fecha),
         descripcion=body.descripcion,
-        cargo=body.monto if body.tipo == "cargo" else None,
-        abono=body.monto if body.tipo == "abono" else None,
-        monto=-body.monto if body.tipo == "cargo" else body.monto,
-        sucursal=None,
-        numero_doc=None,
+        cargo=monto_abs if body.tipo == "cargo" else None,
+        abono=monto_abs if body.tipo == "abono" else None,
+        monto=-monto_abs if body.tipo == "cargo" else monto_abs,
         cuenta=body.cuenta,
     )
     db.add(m)
     db.commit()
-    return {"ok": True, "id": m.id, "fecha": body.fecha, "descripcion": body.descripcion, "monto": body.monto}
+    return {"ok": True, "id": m.id, "fecha": body.fecha, "descripcion": body.descripcion, "monto": monto_abs}
+
+
+@router.post("/movements/apple-pay")
+def add_apple_pay_movement(body: ApplePayMovimiento, db: Session = Depends(_get_db)):
+    """Recibe transacciones desde el Atajo de iOS Apple Pay. Sin autenticación intencional (uso personal)."""
+    monto_abs = abs(int(body.monto))
+    fecha = date.fromisoformat(body.fecha) if body.fecha else date.today()
+    m = MovimientoCC(
+        cartola_id=0,
+        fecha=fecha,
+        descripcion=body.descripcion,
+        cargo=monto_abs,
+        monto=-monto_abs,
+        cuenta=body.cuenta,
+    )
+    db.add(m)
+    db.commit()
+    return {"ok": True, "id": m.id, "descripcion": body.descripcion, "monto": monto_abs}
 
 
 @router.get("/categories")
@@ -269,6 +293,7 @@ def list_movements(
     desde: str | None = Query(None, description="Fecha desde YYYY-MM-DD"),
     hasta: str | None = Query(None, description="Fecha hasta YYYY-MM-DD"),
     tipo: str | None = Query(None, description="'cargo' o 'abono'"),
+    cuenta: str | None = Query(None, description="'cc' cuenta corriente, 'tc' tarjeta"),
     buscar: str | None = Query(None, description="Texto en descripcion"),
     limite: int = Query(200, le=1000),
     offset: int = Query(0),
@@ -286,6 +311,10 @@ def list_movements(
         filters.append(MovimientoCC.cargo != None)
     elif tipo == "abono":
         filters.append(MovimientoCC.abono != None)
+    if cuenta == "cc":
+        filters.append(MovimientoCC.cartola_id != 0)
+    elif cuenta == "tc":
+        filters.append(MovimientoCC.cartola_id == 0)
     if buscar:
         filters.append(MovimientoCC.descripcion.ilike(f"%{buscar}%"))
 
