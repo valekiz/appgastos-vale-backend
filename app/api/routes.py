@@ -240,6 +240,17 @@ def dedupe_movements(
     }
 
 
+@router.delete("/movements/{mov_id}")
+def delete_movement(mov_id: int, db: Session = Depends(_get_db)):
+    """Borra un movimiento individual."""
+    m = db.get(MovimientoCC, mov_id)
+    if not m:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    db.delete(m)
+    db.commit()
+    return {"ok": True, "id": mov_id}
+
+
 @router.delete("/cartolas/{cartola_id}")
 def delete_cartola(cartola_id: int, db: Session = Depends(_get_db)):
     """Borra una cartola y todos sus movimientos."""
