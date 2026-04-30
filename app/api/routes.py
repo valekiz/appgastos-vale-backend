@@ -7,9 +7,21 @@ GET  /summary       — resumen del mes (totales, top gastos)
 GET  /health        — healthcheck para Railway
 """
 import logging
+import re
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
+
+
+def _parse_monto_clp(v) -> int:
+    """Parsea cualquier formato de monto chileno a entero positivo de pesos.
+    Acepta: 1010, "1010", "$1.010", "1.010", "$1010", etc.
+    Para los pesos chilenos asumimos que no hay decimales en uso normal.
+    """
+    if isinstance(v, (int, float)):
+        return abs(int(round(v)))
+    s = re.sub(r'[^\d-]', '', str(v))
+    return abs(int(s)) if s else 0
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import JSONResponse
@@ -88,14 +100,14 @@ class SetCategoriaBody(BaseModel):
 class CreditCardMovimiento(BaseModel):
     fecha: str
     descripcion: str
-    monto: int
+    monto: str | float | int
     tipo: str = "cargo"
     cuenta: str = "tarjeta-credito"
 
 
 class ApplePayMovimiento(BaseModel):
     descripcion: str
-    monto: float          # iOS Shortcuts manda el monto como número
+    monto: str | float | int   # iOS Shortcuts puede mandar "$1.010", 1010, 1010.0...
     fecha: str | None = None   # opcional — si no viene, usa hoy
     cuenta: str = "apple-pay"
 
@@ -103,7 +115,7 @@ class ApplePayMovimiento(BaseModel):
 @router.post("/movements/credit-card")
 def add_credit_card_movement(body: CreditCardMovimiento, db: Session = Depends(_get_db)):
     """Agrega un movimiento de tarjeta de crédito manualmente."""
-    monto_abs = abs(body.monto)
+    monto_abs = _parse_monto_clp(body.monto)
     m = MovimientoCC(
         cartola_id=0,
         fecha=date.fromisoformat(body.fecha),
@@ -121,7 +133,9 @@ def add_credit_card_movement(body: CreditCardMovimiento, db: Session = Depends(_
 @router.post("/movements/apple-pay")
 def add_apple_pay_movement(body: ApplePayMovimiento, db: Session = Depends(_get_db)):
     """Recibe transacciones desde el Atajo de iOS Apple Pay. Sin autenticación intencional (uso personal)."""
-    monto_abs = abs(int(body.monto))
+    monto_abs = _parse_monto_clp(body.monto)
+    if monto_abs == 0:
+        logger.warning("Apple Pay movement received with monto=0. raw=%r desc=%r", body.monto, body.descripcion)
     fecha = date.fromisoformat(body.fecha) if body.fecha else date.today()
     m = MovimientoCC(
         cartola_id=0,
