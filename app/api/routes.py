@@ -9,7 +9,7 @@ GET  /health        — healthcheck para Railway
 import logging
 import re
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 
@@ -22,6 +22,34 @@ def _parse_monto_clp(v) -> int:
         return abs(int(round(v)))
     s = re.sub(r'[^\d-]', '', str(v))
     return abs(int(s)) if s else 0
+
+
+# Stopwords y prefijos que el banco antepone — los strippeamos para comparar
+_DESC_NOISE = {
+    'santiago', 'las', 'condes', 'colchagua', 'cl', 'sa', 'spa', 'ltda',
+    'compra', 'directa', 'pago', 'comercial', 'servicios',
+}
+
+def _normalize_desc(s: str) -> set[str]:
+    """Tokeniza una descripción para comparar similitud. Strippea ruido del banco."""
+    if not s:
+        return set()
+    # minúsculas, quitar acentos sencillos, quedarse solo con palabras
+    s = s.lower()
+    s = re.sub(r'[áä]', 'a', s); s = re.sub(r'[éë]', 'e', s)
+    s = re.sub(r'[íï]', 'i', s); s = re.sub(r'[óö]', 'o', s); s = re.sub(r'[úü]', 'u', s)
+    tokens = re.findall(r'[a-z0-9]+', s)
+    return {t for t in tokens if len(t) >= 3 and t not in _DESC_NOISE}
+
+
+def _desc_similarity(a: str, b: str) -> float:
+    """Jaccard sobre tokens normalizados. 0 = nada en común, 1 = idéntico."""
+    ta, tb = _normalize_desc(a), _normalize_desc(b)
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    return inter / union if union else 0.0
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
 from fastapi.responses import JSONResponse
@@ -232,6 +260,86 @@ def delete_category(cat_id: int, db: Session = Depends(_get_db)):
     return {"ok": True}
 
 
+def _merge_apple_pay_with_tc(
+    db: Session,
+    desde: date | None = None,
+    fecha_window: int = 5,
+    min_similarity: float = 0.20,
+    dry_run: bool = False,
+):
+    """Para cada movimiento apple-pay, busca un cargo TC equivalente
+    (mismo monto, fecha ±N días, descripción similar) y los fusiona:
+    transfiere la categoría del apple-pay al TC y borra el apple-pay.
+    """
+    if desde is None:
+        desde = date.today() - timedelta(days=90)
+
+    apple_movs = db.execute(
+        select(MovimientoCC)
+        .where(
+            MovimientoCC.cuenta == 'apple-pay',
+            MovimientoCC.fecha >= desde,
+        )
+    ).scalars().all()
+
+    merged = []
+    for ap in apple_movs:
+        candidatos = db.execute(
+            select(MovimientoCC).where(
+                MovimientoCC.cuenta == 'tarjeta-credito',
+                MovimientoCC.cargo == ap.cargo,
+                MovimientoCC.fecha >= ap.fecha - timedelta(days=fecha_window),
+                MovimientoCC.fecha <= ap.fecha + timedelta(days=fecha_window),
+            )
+        ).scalars().all()
+        if not candidatos:
+            continue
+
+        scored = sorted(
+            ((c, _desc_similarity(ap.descripcion, c.descripcion)) for c in candidatos),
+            key=lambda x: x[1], reverse=True,
+        )
+        best, score = scored[0]
+        # Si hay un solo candidato, lo aceptamos aunque no haya descripcion similar
+        # (un cargo del mismo monto en ±5 días es muy probablemente el mismo).
+        if len(candidatos) > 1 and score < min_similarity:
+            continue
+
+        info = {
+            "apple_pay_id": ap.id,
+            "tc_id": best.id,
+            "monto": str(ap.cargo) if ap.cargo else str(ap.monto),
+            "ap_desc": ap.descripcion,
+            "tc_desc": best.descripcion,
+            "score": round(score, 2),
+        }
+        merged.append(info)
+
+        if not dry_run:
+            # Si el TC no tiene categoría y el apple-pay sí, transferimos
+            if ap.categoria_id and not best.categoria_id:
+                best.categoria_id = ap.categoria_id
+            db.delete(ap)
+
+    if not dry_run:
+        db.commit()
+
+    return merged
+
+
+@router.post("/movements/merge-realtime")
+def merge_realtime_with_cartola(
+    desde: str | None = Query(None, description="Solo merge desde esta fecha YYYY-MM-DD (default: hace 90 días)"),
+    dry_run: bool = Query(False),
+    db: Session = Depends(_get_db),
+):
+    """Fusiona movimientos apple-pay con sus duplicados de la cartola TC.
+    Útil correr después de un sync — se llama automáticamente desde /sync."""
+    desde_d = date.fromisoformat(desde) if desde else None
+    merged = _merge_apple_pay_with_tc(db, desde=desde_d, dry_run=dry_run)
+    return {"merged_count": len(merged), "dry_run": dry_run, "details": merged[:50]}
+
+
 @router.post("/movements/dedupe")
 def dedupe_movements(
     desde: str | None = Query(None),
@@ -422,7 +530,19 @@ def sync_from_email(db: Session = Depends(_get_db)):
             logger.error("Error procesando estado TC UID %s: %s", raw.uid, exc)
             procesados.append({"uid": raw.uid, "tipo": "tc", "error": str(exc)})
 
-    return {"procesados": procesados, "total": len(procesados)}
+    # Auto-merge apple-pay con cargos TC duplicados de las cartolas recién importadas
+    merged = []
+    try:
+        merged = _merge_apple_pay_with_tc(db)
+    except Exception as exc:
+        logger.error("Error en auto-merge apple-pay/TC: %s", exc)
+
+    return {
+        "procesados": procesados,
+        "total": len(procesados),
+        "apple_pay_merged": len(merged),
+        "merged_details": merged[:20],
+    }
 
 
 class ImportMovimientosBody(BaseModel):
