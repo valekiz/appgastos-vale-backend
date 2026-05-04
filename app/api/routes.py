@@ -23,7 +23,7 @@ def _parse_monto_clp(v) -> int:
     s = re.sub(r'[^\d-]', '', str(v))
     return abs(int(s)) if s else 0
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -130,12 +130,31 @@ def add_credit_card_movement(body: CreditCardMovimiento, db: Session = Depends(_
     return {"ok": True, "id": m.id, "fecha": body.fecha, "descripcion": body.descripcion, "monto": monto_abs}
 
 
+# Buffer en memoria de últimos 50 payloads recibidos en /movements/apple-pay.
+# Se pierde al reiniciar Render, pero sirve para debug en vivo del atajo iOS.
+_recent_apple_pay_raws: list = []
+
+
 @router.post("/movements/apple-pay")
-def add_apple_pay_movement(body: ApplePayMovimiento, db: Session = Depends(_get_db)):
+async def add_apple_pay_movement(request: Request, db: Session = Depends(_get_db)):
     """Recibe transacciones desde el Atajo de iOS Apple Pay. Sin autenticación intencional (uso personal)."""
+    raw_bytes = await request.body()
+    raw_text = raw_bytes.decode("utf-8", errors="replace")
+    _recent_apple_pay_raws.append({"ts": datetime.utcnow().isoformat(), "raw": raw_text})
+    if len(_recent_apple_pay_raws) > 50:
+        _recent_apple_pay_raws.pop(0)
+
+    try:
+        import json as _json
+        data = _json.loads(raw_text) if raw_text.strip() else {}
+        body = ApplePayMovimiento(**data)
+    except Exception as exc:
+        logger.warning("Apple Pay body parse failed: %s — raw=%r", exc, raw_text[:500])
+        raise HTTPException(status_code=400, detail=f"Body inválido: {exc}")
+
     monto_abs = _parse_monto_clp(body.monto)
     if monto_abs == 0:
-        logger.warning("Apple Pay movement received with monto=0. raw=%r desc=%r", body.monto, body.descripcion)
+        logger.warning("Apple Pay con monto=0. raw=%r desc=%r", body.monto, body.descripcion)
     fecha = date.fromisoformat(body.fecha) if body.fecha else date.today()
     m = MovimientoCC(
         cartola_id=0,
@@ -252,6 +271,47 @@ def dedupe_movements(
         "deleted_ids": deleted_ids[:50],
         "dry_run": dry_run,
     }
+
+
+@router.get("/movements/apple-pay/debug")
+def apple_pay_debug():
+    """Devuelve los últimos payloads recibidos en /movements/apple-pay (en memoria, max 50)."""
+    return {"count": len(_recent_apple_pay_raws), "raws": list(reversed(_recent_apple_pay_raws))}
+
+
+class UpdateMovBody(BaseModel):
+    descripcion: str | None = None
+    monto: str | float | int | None = None
+    fecha: str | None = None
+    cuenta: str | None = None
+
+
+@router.patch("/movements/{mov_id}")
+def update_movement(mov_id: int, body: UpdateMovBody, db: Session = Depends(_get_db)):
+    """Actualiza campos editables de un movimiento (monto, descripcion, fecha, cuenta)."""
+    m = db.get(MovimientoCC, mov_id)
+    if not m:
+        raise HTTPException(status_code=404, detail="Movimiento no encontrado")
+    if body.descripcion is not None:
+        m.descripcion = body.descripcion
+    if body.fecha is not None:
+        m.fecha = date.fromisoformat(body.fecha)
+    if body.cuenta is not None:
+        m.cuenta = body.cuenta
+    if body.monto is not None:
+        n = _parse_monto_clp(body.monto)
+        # Para apple-pay y tarjeta-credito, todo es cargo (negativo)
+        es_cargo = m.cuenta in ("apple-pay", "tarjeta-credito") or (m.cargo is not None) or (m.monto and int(m.monto) < 0)
+        if es_cargo:
+            m.cargo = n
+            m.abono = None
+            m.monto = -n
+        else:
+            m.abono = n
+            m.cargo = None
+            m.monto = n
+    db.commit()
+    return {"ok": True, "id": mov_id, "monto": str(m.monto), "descripcion": m.descripcion}
 
 
 @router.delete("/movements/{mov_id}")
