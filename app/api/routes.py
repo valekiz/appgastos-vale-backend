@@ -461,9 +461,17 @@ def set_movement_category(
     return {"ok": True, "id": mov_id, "categoria_id": body.categoria_id}
 
 
-@router.get("/health")
-def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+@router.api_route("/health", methods=["GET", "HEAD"])
+def health(db: Session = Depends(_get_db)):
+    """Healthcheck — soporta GET y HEAD (UptimeRobot free tier usa HEAD).
+    Toca la DB para que el wake-up del servicio caliente también el pool de Postgres.
+    """
+    try:
+        db.execute(select(func.count()).select_from(Categoria)).scalar()
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return {"status": "ok", "db": db_ok, "timestamp": datetime.utcnow().isoformat()}
 
 
 @router.post("/sync")
