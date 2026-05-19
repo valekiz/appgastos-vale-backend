@@ -20,7 +20,13 @@ if DATABASE_URL:
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     if "supabase.co" in DATABASE_URL and "sslmode" not in DATABASE_URL:
         DATABASE_URL += "?sslmode=require"
-    engine = create_engine(DATABASE_URL)
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,   # valida conexiones antes de usarlas (evita errores de conexión rota)
+        pool_recycle=1800,    # recicla conexiones cada 30 min (Supabase a veces mata las viejas)
+        pool_size=5,
+        max_overflow=5,
+    )
 else:
     DB_PATH = os.environ.get("DB_PATH", "gastos.db")
     engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
