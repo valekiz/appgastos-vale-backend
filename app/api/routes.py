@@ -536,7 +536,8 @@ def sync_from_email(db: Session = Depends(_get_db)):
 
     # ── Estado TC ─────────────────────────────────────────────────────────────
     try:
-        tc_poller = GmailPoller(subject_filter="Estado de Cuenta Tarjeta de Crédito")
+        # Substring ASCII para evitar problemas de encoding con acentos
+        tc_poller = GmailPoller(subject_filter="Estado de Cuenta Tarjeta de Cr")
         tc_raws = tc_poller.fetch_new()
     except Exception as exc:
         logger.error("Error buscando emails TC: %s", exc)

@@ -191,7 +191,8 @@ class GmailPoller:
         - Son del sender esperado
         - NO tienen el label de procesado
 
-        Usa X-GM-RAW (extensión Gmail) que maneja acentos y la sintaxis nativa de Gmail.
+        Usa X-GM-RAW (extensión Gmail). Para manejar non-ASCII en el subject,
+        codifica el query como bytes UTF-8 (imaplib en string-mode falla con acentos).
         """
         # Sintaxis nativa de Gmail — maneja acentos correctamente
         gm_query = (
@@ -200,10 +201,12 @@ class GmailPoller:
             f'-label:{self._processed_label}'
         )
         try:
-            status, data = conn.uid("SEARCH", "X-GM-RAW", f'"{gm_query}"')
+            # Encodear como bytes UTF-8 para evitar el error 'ascii' codec
+            quoted = f'"{gm_query}"'.encode('utf-8')
+            status, data = conn.uid("SEARCH", "X-GM-RAW", quoted)
             if status == "OK" and data[0]:
                 return data[0].split()
-        except imaplib.IMAP4.error as exc:
+        except (imaplib.IMAP4.error, UnicodeEncodeError) as exc:
             logger.warning("X-GM-RAW search falló: %s. Probando IMAP plano.", exc)
 
         # Fallback 1: IMAP SEARCH normal (puede fallar con acentos)
