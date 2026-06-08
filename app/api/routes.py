@@ -140,6 +140,16 @@ class ApplePayMovimiento(BaseModel):
     cuenta: str = "apple-pay"
 
 
+class ManualMovimiento(BaseModel):
+    """Movimiento ingresado manualmente por el usuario antes que llegue la cartola.
+    Se auto-fusiona con el cargo de la cartola correspondiente cuando esta entra."""
+    descripcion: str
+    monto: str | float | int
+    fecha: str | None = None
+    tipo: str = "cargo"   # 'cargo' o 'abono'
+    cuenta: str = "manual"
+
+
 @router.post("/movements/credit-card")
 def add_credit_card_movement(body: CreditCardMovimiento, db: Session = Depends(_get_db)):
     """Agrega un movimiento de tarjeta de crédito manualmente."""
@@ -195,6 +205,28 @@ async def add_apple_pay_movement(request: Request, db: Session = Depends(_get_db
     db.add(m)
     db.commit()
     return {"ok": True, "id": m.id, "descripcion": body.descripcion, "monto": monto_abs}
+
+
+@router.post("/movements/manual")
+def add_manual_movement(body: ManualMovimiento, db: Session = Depends(_get_db)):
+    """Gasto/abono manual ingresado por el usuario antes que llegue la cartola.
+    Se auto-fusiona con el cargo de la cartola correspondiente cuando esta entra
+    (vía la lógica de merge en /sync)."""
+    monto_abs = _parse_monto_clp(body.monto)
+    fecha = date.fromisoformat(body.fecha) if body.fecha else date.today()
+    es_abono = body.tipo == "abono"
+    m = MovimientoCC(
+        cartola_id=0,
+        fecha=fecha,
+        descripcion=body.descripcion,
+        cargo=monto_abs if not es_abono else None,
+        abono=monto_abs if es_abono else None,
+        monto=-monto_abs if not es_abono else monto_abs,
+        cuenta=body.cuenta or "manual",
+    )
+    db.add(m)
+    db.commit()
+    return {"ok": True, "id": m.id, "descripcion": body.descripcion, "monto": monto_abs, "tipo": body.tipo}
 
 
 @router.get("/categories")
@@ -260,6 +292,9 @@ def delete_category(cat_id: int, db: Session = Depends(_get_db)):
     return {"ok": True}
 
 
+# Cuentas que son "tiempo-real" (provisorias, esperan match en cartola)
+REALTIME_CUENTAS = ('apple-pay', 'manual')
+
 def _merge_apple_pay_with_tc(
     db: Session,
     desde: date | None = None,
@@ -267,36 +302,45 @@ def _merge_apple_pay_with_tc(
     min_similarity: float = 0.20,
     dry_run: bool = False,
 ):
-    """Para cada movimiento apple-pay, busca un cargo TC equivalente
-    (mismo monto, fecha ±N días, descripción similar) y los fusiona:
-    transfiere la categoría del apple-pay al TC y borra el apple-pay.
+    """Para cada movimiento de tiempo-real (apple-pay o manual), busca un cargo
+    equivalente en una cartola (mismo monto, fecha ±N días, descripción similar)
+    y los fusiona: transfiere la categoría al movimiento de cartola y borra el provisorio.
     """
     if desde is None:
         desde = date.today() - timedelta(days=90)
 
-    apple_movs = db.execute(
+    realtime_movs = db.execute(
         select(MovimientoCC)
         .where(
-            MovimientoCC.cuenta == 'apple-pay',
+            MovimientoCC.cuenta.in_(REALTIME_CUENTAS),
             MovimientoCC.fecha >= desde,
         )
     ).scalars().all()
 
     merged = []
-    for ap in apple_movs:
+    for rt in realtime_movs:
+        # Match: mismo monto, dentro de ±N días, en cualquier cuenta NO provisoria
+        # (cartola CC, TC, o cualquier otra cuenta del banco)
+        if rt.cargo:
+            monto_filter = MovimientoCC.cargo == rt.cargo
+        elif rt.abono:
+            monto_filter = MovimientoCC.abono == rt.abono
+        else:
+            continue
+
         candidatos = db.execute(
             select(MovimientoCC).where(
-                MovimientoCC.cuenta == 'tarjeta-credito',
-                MovimientoCC.cargo == ap.cargo,
-                MovimientoCC.fecha >= ap.fecha - timedelta(days=fecha_window),
-                MovimientoCC.fecha <= ap.fecha + timedelta(days=fecha_window),
+                ~MovimientoCC.cuenta.in_(REALTIME_CUENTAS),
+                monto_filter,
+                MovimientoCC.fecha >= rt.fecha - timedelta(days=fecha_window),
+                MovimientoCC.fecha <= rt.fecha + timedelta(days=fecha_window),
             )
         ).scalars().all()
         if not candidatos:
             continue
 
         scored = sorted(
-            ((c, _desc_similarity(ap.descripcion, c.descripcion)) for c in candidatos),
+            ((c, _desc_similarity(rt.descripcion, c.descripcion)) for c in candidatos),
             key=lambda x: x[1], reverse=True,
         )
         best, score = scored[0]
@@ -306,20 +350,21 @@ def _merge_apple_pay_with_tc(
             continue
 
         info = {
-            "apple_pay_id": ap.id,
-            "tc_id": best.id,
-            "monto": str(ap.cargo) if ap.cargo else str(ap.monto),
-            "ap_desc": ap.descripcion,
-            "tc_desc": best.descripcion,
+            "realtime_id": rt.id,
+            "realtime_cuenta": rt.cuenta,
+            "cartola_id": best.id,
+            "monto": str(rt.cargo or rt.abono or rt.monto),
+            "rt_desc": rt.descripcion,
+            "cartola_desc": best.descripcion,
             "score": round(score, 2),
         }
         merged.append(info)
 
         if not dry_run:
-            # Si el TC no tiene categoría y el apple-pay sí, transferimos
-            if ap.categoria_id and not best.categoria_id:
-                best.categoria_id = ap.categoria_id
-            db.delete(ap)
+            # Si el de cartola no tiene categoría y el provisorio sí, transferimos
+            if rt.categoria_id and not best.categoria_id:
+                best.categoria_id = rt.categoria_id
+            db.delete(rt)
 
     if not dry_run:
         db.commit()
