@@ -136,7 +136,23 @@ class GmailPoller:
         - Tienen el asunto esperado
         - Son del sender esperado
         - NO tienen el label de procesado
+
+        Usa X-GM-RAW (extensión Gmail) que maneja acentos y la sintaxis nativa de Gmail.
         """
+        # Sintaxis nativa de Gmail — maneja acentos correctamente
+        gm_query = (
+            f'from:{self.sender_filter} '
+            f'subject:"{self.subject_filter}" '
+            f'-label:{self._processed_label}'
+        )
+        try:
+            status, data = conn.uid("SEARCH", "X-GM-RAW", f'"{gm_query}"')
+            if status == "OK" and data[0]:
+                return data[0].split()
+        except imaplib.IMAP4.error as exc:
+            logger.warning("X-GM-RAW search falló: %s. Probando IMAP plano.", exc)
+
+        # Fallback 1: IMAP SEARCH normal (puede fallar con acentos)
         criteria = (
             f'FROM "{self.sender_filter}" '
             f'SUBJECT "{self.subject_filter}" '
@@ -144,14 +160,47 @@ class GmailPoller:
         )
         try:
             status, data = conn.uid("SEARCH", None, criteria)
+            if status == "OK" and data[0]:
+                return data[0].split()
         except imaplib.IMAP4.error:
-            # Fallback sin X-GM-LABELS si el servidor no lo soporta
-            simple_criteria = f'FROM "{self.sender_filter}" SUBJECT "{self.subject_filter}"'
-            status, data = conn.uid("SEARCH", None, simple_criteria)
+            pass
 
+        # Fallback 2: solo por sender, filtramos subject en Python después
+        simple_criteria = f'FROM "{self.sender_filter}"'
+        status, data = conn.uid("SEARCH", None, simple_criteria)
         if status != "OK" or not data[0]:
             return []
-        return data[0].split()
+        all_uids = data[0].split()
+        # Filtramos por subject en Python para evitar problemas de encoding
+        filtered = []
+        for uid in all_uids[-100:]:  # solo los últimos 100 para no demorar
+            try:
+                st, msg_data = conn.uid("FETCH", uid, "(BODY[HEADER.FIELDS (SUBJECT X-GM-LABELS)])")
+                if st != "OK":
+                    continue
+                raw = msg_data[0][1]
+                if isinstance(raw, bytes):
+                    header_text = raw.decode("utf-8", errors="replace")
+                else:
+                    header_text = str(raw)
+                # Match flexible: tokens del subject_filter sin acentos
+                subj_lower = header_text.lower()
+                expected_tokens = [t.lower() for t in self.subject_filter.split()
+                                   if len(t) >= 4 and t.lower() not in {'mensual', 'cuentas.', 'de'}]
+                if not expected_tokens:
+                    expected_tokens = [self.subject_filter.lower()]
+                # Quitamos acentos para match más permisivo
+                def _strip_acc(s):
+                    return (s.replace('á','a').replace('é','e').replace('í','i')
+                             .replace('ó','o').replace('ú','u').replace('ñ','n'))
+                subj_norm = _strip_acc(subj_lower)
+                if all(_strip_acc(t) in subj_norm for t in expected_tokens):
+                    # Skip los que ya tienen el label de procesado
+                    if self._processed_label.lower() not in subj_lower:
+                        filtered.append(uid)
+            except Exception:
+                continue
+        return filtered
 
     def _fetch_cartola(self, conn, uid: bytes) -> RawCartola | None:
         """Descarga un email y extrae el primer adjunto PDF."""
