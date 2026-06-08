@@ -577,11 +577,36 @@ def sync_from_email(db: Session = Depends(_get_db)):
     except Exception as exc:
         logger.error("Error en auto-merge apple-pay/TC: %s", exc)
 
+    # Auto-dedupe: si el usuario re-envió emails, los movimientos se duplican (mismo
+    # contenido pero distinto email_uid). Borramos duplicados exactos manteniendo id menor.
+    auto_deleted = 0
+    try:
+        # Solo últimos 180 días para no escanear toda la DB cada sync
+        cutoff = date.today() - timedelta(days=180)
+        movs_recent = db.execute(
+            select(MovimientoCC)
+            .where(MovimientoCC.fecha >= cutoff)
+            .order_by(MovimientoCC.id)
+        ).scalars().all()
+        seen: dict = {}
+        for m in movs_recent:
+            key = (m.fecha.isoformat(), m.descripcion, str(m.monto), m.cuenta)
+            if key in seen:
+                db.delete(m)
+                auto_deleted += 1
+            else:
+                seen[key] = m.id
+        if auto_deleted:
+            db.commit()
+    except Exception as exc:
+        logger.error("Error en auto-dedupe post-sync: %s", exc)
+
     return {
         "procesados": procesados,
         "total": len(procesados),
         "apple_pay_merged": len(merged),
         "merged_details": merged[:20],
+        "auto_dedupe_removed": auto_deleted,
     }
 
 
