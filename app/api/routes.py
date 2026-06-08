@@ -461,6 +461,16 @@ def set_movement_category(
     return {"ok": True, "id": mov_id, "categoria_id": body.categoria_id}
 
 
+@router.get("/sync/debug/search")
+def debug_search(subject: str | None = Query(None, description="Subject a buscar (override del filtro)")):
+    """Debug: muestra qué uids encuentra cada estrategia de búsqueda en Gmail."""
+    try:
+        poller = GmailPoller()
+        return poller.debug_search(subject=subject)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error: {exc}")
+
+
 @router.get("/sync/debug/inbox")
 def debug_inbox(days: int = Query(60, le=365)):
     """Lista los últimos emails de Santander en la inbox (sin filtrar por subject).

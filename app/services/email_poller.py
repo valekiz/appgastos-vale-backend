@@ -81,6 +81,60 @@ class GmailPoller:
                     logger.error("Error procesando UID %s: %s", uid, exc)
             return result
 
+    def debug_search(self, subject: str | None = None) -> dict:
+        """Devuelve qué uids encuentra cada estrategia de search.
+        Si pasas subject, lo usa como override del subject_filter."""
+        original_subj = self.subject_filter
+        if subject:
+            self.subject_filter = subject
+        result = {"subject_filter": self.subject_filter, "sender": self.sender_filter, "processed_label": self._processed_label}
+        try:
+            with self._connect() as conn:
+                # 1) X-GM-RAW
+                gm_query = (
+                    f'from:{self.sender_filter} '
+                    f'subject:"{self.subject_filter}" '
+                    f'-label:{self._processed_label}'
+                )
+                try:
+                    st, data = conn.uid("SEARCH", "X-GM-RAW", f'"{gm_query}"')
+                    result["xgmraw"] = {"status": st, "uids": [u.decode() for u in (data[0].split() if data and data[0] else [])]}
+                except Exception as exc:
+                    result["xgmraw"] = {"error": str(exc)}
+
+                # 2) X-GM-RAW sin -label
+                gm_query2 = f'from:{self.sender_filter} subject:"{self.subject_filter}"'
+                try:
+                    st, data = conn.uid("SEARCH", "X-GM-RAW", f'"{gm_query2}"')
+                    uids2 = [u.decode() for u in (data[0].split() if data and data[0] else [])]
+                    result["xgmraw_all"] = {"status": st, "count": len(uids2), "uids": uids2[-20:]}
+                except Exception as exc:
+                    result["xgmraw_all"] = {"error": str(exc)}
+
+                # 3) IMAP normal SUBJECT
+                try:
+                    crit = f'FROM "{self.sender_filter}" SUBJECT "{self.subject_filter}"'
+                    st, data = conn.uid("SEARCH", None, crit)
+                    uids3 = [u.decode() for u in (data[0].split() if data and data[0] else [])]
+                    result["imap_subject"] = {"status": st, "count": len(uids3), "uids": uids3[-20:]}
+                except Exception as exc:
+                    result["imap_subject"] = {"error": str(exc)}
+
+                # 4) Para uids encontrados en xgmraw_all, verificar sus labels actuales
+                if result.get("xgmraw_all", {}).get("uids"):
+                    sample = result["xgmraw_all"]["uids"][-5:]
+                    labels = []
+                    for uid in sample:
+                        try:
+                            st, data = conn.uid("FETCH", uid.encode(), "(X-GM-LABELS)")
+                            labels.append({"uid": uid, "raw": str(data[0]) if data and data[0] else None})
+                        except Exception as exc:
+                            labels.append({"uid": uid, "error": str(exc)})
+                    result["sample_labels"] = labels
+        finally:
+            self.subject_filter = original_subj
+        return result
+
     def list_subjects(self, days: int = 60, sender_only: bool = True) -> list[dict]:
         """Devuelve subject/fecha/UID de los últimos N días desde el sender, sin filtrar por subject.
         Útil para diagnosticar qué emails existen cuando el filtro no matchea.
