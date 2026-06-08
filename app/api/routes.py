@@ -461,6 +461,18 @@ def set_movement_category(
     return {"ok": True, "id": mov_id, "categoria_id": body.categoria_id}
 
 
+@router.get("/sync/debug/inbox")
+def debug_inbox(days: int = Query(60, le=365)):
+    """Lista los últimos emails de Santander en la inbox (sin filtrar por subject).
+    Sirve para diagnosticar qué subjects realmente están llegando."""
+    try:
+        poller = GmailPoller()
+        subjects = poller.list_subjects(days=days)
+        return {"count": len(subjects), "emails": subjects}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error conectando a Gmail: {exc}")
+
+
 @router.api_route("/health", methods=["GET", "HEAD"])
 def health(db: Session = Depends(_get_db)):
     """Healthcheck — soporta GET y HEAD (UptimeRobot free tier usa HEAD).

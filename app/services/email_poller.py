@@ -81,6 +81,39 @@ class GmailPoller:
                     logger.error("Error procesando UID %s: %s", uid, exc)
             return result
 
+    def list_subjects(self, days: int = 60, sender_only: bool = True) -> list[dict]:
+        """Devuelve subject/fecha/UID de los últimos N días desde el sender, sin filtrar por subject.
+        Útil para diagnosticar qué emails existen cuando el filtro no matchea.
+        """
+        from datetime import datetime, timedelta
+        since = (datetime.utcnow() - timedelta(days=days)).strftime("%d-%b-%Y")
+        with self._connect() as conn:
+            if sender_only:
+                criteria = f'FROM "{self.sender_filter}" SINCE {since}'
+            else:
+                criteria = f'SINCE {since}'
+            status, data = conn.uid("SEARCH", None, criteria)
+            if status != "OK" or not data[0]:
+                return []
+            uids = data[0].split()
+            out = []
+            for uid in uids[-50:]:  # cap en 50
+                try:
+                    st, msg_data = conn.uid("FETCH", uid, "(BODY[HEADER.FIELDS (SUBJECT FROM DATE)])")
+                    if st != "OK":
+                        continue
+                    raw = msg_data[0][1]
+                    msg = email.message_from_bytes(raw)
+                    out.append({
+                        "uid": uid.decode(),
+                        "subject": self._decode_header(msg.get("Subject", "")),
+                        "from": self._decode_header(msg.get("From", "")),
+                        "date": msg.get("Date", ""),
+                    })
+                except Exception as exc:
+                    logger.error("Error fetching headers UID %s: %s", uid, exc)
+            return out
+
     def mark_processed(self, uid: str) -> None:
         """Agrega el label 'AppGastos/Processed' al email para no volver a procesarlo."""
         with self._connect() as conn:
