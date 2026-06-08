@@ -51,16 +51,23 @@ class GmailPoller:
         user: str | None = None,
         app_password: str | None = None,
         subject_filter: str | None = None,
-        sender_filter: str | None = None,
+        sender_filter: str | list[str] | None = None,
     ):
         self.user = user or os.environ["GMAIL_USER"]
         self.app_password = app_password or os.environ["GMAIL_APP_PASS"]
         self.subject_filter = subject_filter or os.environ.get(
             "GMAIL_SUBJECT", "Cartola Mensual de Cuentas."
         )
-        self.sender_filter = sender_filter or os.environ.get(
+        # sender_filter puede ser str o lista. Internamente siempre normalizamos a lista.
+        raw_senders = sender_filter or os.environ.get(
             "GMAIL_SENDER", "mensajeria@santander.cl"
         )
+        if isinstance(raw_senders, str):
+            self.sender_filters = [s.strip() for s in raw_senders.split(",") if s.strip()]
+        else:
+            self.sender_filters = list(raw_senders)
+        # Para compat con código viejo
+        self.sender_filter = self.sender_filters[0] if self.sender_filters else ""
         # Label que le ponemos a los emails ya procesados
         self._processed_label = os.environ.get("GMAIL_PROCESSED_LABEL", "AppGastos/Processed")
 
@@ -194,9 +201,15 @@ class GmailPoller:
         Usa X-GM-RAW (extensión Gmail). Para manejar non-ASCII en el subject,
         codifica el query como bytes UTF-8 (imaplib en string-mode falla con acentos).
         """
-        # Sintaxis nativa de Gmail — maneja acentos correctamente
+        # Sintaxis nativa de Gmail — maneja acentos correctamente.
+        # Si hay múltiples senders válidos (ej. banco + propia cuenta para re-envíos), usamos OR.
+        if len(self.sender_filters) == 1:
+            from_clause = f'from:{self.sender_filters[0]}'
+        else:
+            ors = " OR ".join(f'from:{s}' for s in self.sender_filters)
+            from_clause = f'({ors})'
         gm_query = (
-            f'from:{self.sender_filter} '
+            f'{from_clause} '
             f'subject:"{self.subject_filter}" '
             f'-label:{self._processed_label}'
         )
@@ -209,25 +222,37 @@ class GmailPoller:
         except (imaplib.IMAP4.error, UnicodeEncodeError) as exc:
             logger.warning("X-GM-RAW search falló: %s. Probando IMAP plano.", exc)
 
-        # Fallback 1: IMAP SEARCH normal (puede fallar con acentos)
-        criteria = (
-            f'FROM "{self.sender_filter}" '
-            f'SUBJECT "{self.subject_filter}" '
-            f'X-GM-LABELS NOT "{self._processed_label}"'
-        )
-        try:
-            status, data = conn.uid("SEARCH", None, criteria)
-            if status == "OK" and data[0]:
-                return data[0].split()
-        except imaplib.IMAP4.error:
-            pass
+        # Fallback 1: IMAP SEARCH normal por cada sender (puede fallar con acentos)
+        all_uids_set: set[bytes] = set()
+        for sender in self.sender_filters:
+            criteria = (
+                f'FROM "{sender}" '
+                f'SUBJECT "{self.subject_filter}" '
+                f'X-GM-LABELS NOT "{self._processed_label}"'
+            )
+            try:
+                status, data = conn.uid("SEARCH", None, criteria)
+                if status == "OK" and data[0]:
+                    all_uids_set.update(data[0].split())
+            except imaplib.IMAP4.error:
+                pass
+        if all_uids_set:
+            return sorted(all_uids_set)
 
-        # Fallback 2: solo por sender, filtramos subject en Python después
-        simple_criteria = f'FROM "{self.sender_filter}"'
-        status, data = conn.uid("SEARCH", None, simple_criteria)
-        if status != "OK" or not data[0]:
+        # Fallback 2: solo por sender(s), filtramos subject en Python después
+        all_uids: list[bytes] = []
+        seen: set[bytes] = set()
+        for sender in self.sender_filters:
+            simple_criteria = f'FROM "{sender}"'
+            status, data = conn.uid("SEARCH", None, simple_criteria)
+            if status != "OK" or not data[0]:
+                continue
+            for uid in data[0].split():
+                if uid not in seen:
+                    seen.add(uid)
+                    all_uids.append(uid)
+        if not all_uids:
             return []
-        all_uids = data[0].split()
         # Filtramos por subject en Python para evitar problemas de encoding
         filtered = []
         for uid in all_uids[-100:]:  # solo los últimos 100 para no demorar

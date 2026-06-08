@@ -509,9 +509,15 @@ def sync_from_email(db: Session = Depends(_get_db)):
 
     procesados = []
 
+    # Senders aceptados: el banco + la propia cuenta del usuario (para emails reenviados a sí mismo)
+    import os as _os
+    _bank_sender = _os.environ.get("GMAIL_SENDER", "mensajeria@santander.cl")
+    _self_sender = _os.environ.get("GMAIL_USER", "")
+    _all_senders = [s for s in (_bank_sender, _self_sender) if s]
+
     # ── Cartola CC ────────────────────────────────────────────────────────────
     try:
-        cc_poller = GmailPoller()
+        cc_poller = GmailPoller(sender_filter=_all_senders)
         cc_raws = cc_poller.fetch_new()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error conectando a Gmail: {exc}")
@@ -537,7 +543,10 @@ def sync_from_email(db: Session = Depends(_get_db)):
     # ── Estado TC ─────────────────────────────────────────────────────────────
     try:
         # Substring ASCII para evitar problemas de encoding con acentos
-        tc_poller = GmailPoller(subject_filter="Estado de Cuenta Tarjeta de Cr")
+        tc_poller = GmailPoller(
+            subject_filter="Estado de Cuenta Tarjeta de Cr",
+            sender_filter=_all_senders,
+        )
         tc_raws = tc_poller.fetch_new()
     except Exception as exc:
         logger.error("Error buscando emails TC: %s", exc)
