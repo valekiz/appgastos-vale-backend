@@ -56,6 +56,12 @@ PWA de seguimiento de gastos personales con tema Maplestory + glassmorphism game
 | `/summary/yearly/categories` | GET | Datos para gráfico apilado |
 | `/upload-pdf` | POST | Sube PDF directo (puede dar OOM en Render free) |
 | `/import-movements` | POST | Toma JSON ya parseado — usar este si `/upload-pdf` falla |
+| `/movements/{id}` | DELETE | Borra un movimiento individual |
+| `/movements/{id}` | PATCH | Edita campos (descripcion, monto, fecha, cuenta) |
+| `/movements/apple-pay` | POST | Acepta `monto` en cualquier formato CLP (`1010`, `"$1.010"`, etc.) |
+| `/movements/merge-realtime` | POST | Fusiona apple-pay con cargos TC duplicados (auto se corre tras `/sync`). `dry_run=true` para preview |
+| `/sync/debug/inbox?days=60` | GET | Lista emails de Santander en inbox (sin filtro de subject) — diagnóstico |
+| `/sync/debug/search?subject=...` | GET | Prueba cada estrategia de search IMAP — diagnóstico |
 
 ## Workflows comunes
 
@@ -112,6 +118,8 @@ Bumpear la constante `CACHE` en `frontend/sw.js` (`appgastos-vN` → `vN+1`). Al
 - **iOS Safari `<select>`.** Ignora `font-family`, `color`, `background`. Por eso usamos dropdown custom.
 - **PWA en GH Pages subdir.** `manifest.json` debe tener `start_url: "./"` (relativo) y `scope: "./"`. Si pones `/`, el ícono lleva al root de github.io (404).
 - **Maplestory.io CORS-free pero a veces lenta.** Imágenes con `onerror="this.style.display='none'"` para fallback silencioso.
+- **IMAP search con acentos.** `imaplib` no maneja non-ASCII en `criteria`: si el subject lleva `é`/`ó`/`ñ`, lanza `'ascii' codec can't encode...` y el search devuelve 0 silenciosamente. Workarounds en `email_poller.py:_search_unprocessed`: (1) usar `X-GM-RAW` con el query codificado como **bytes UTF-8**, o (2) usar subject ASCII como substring (Gmail hace substring match). Por eso `routes.py /sync` usa `"Estado de Cuenta Tarjeta de Cr"` y no `"...Crédito"` para el poller TC — durante semanas pasó desapercibido que cero TC entraran.
+- **Endpoints de diagnóstico Gmail:** `GET /sync/debug/inbox?days=N` lista todos los emails de Santander con su subject/fecha/UID (sin filtrar por subject) — útil cuando una cartola "no llega" para ver qué hay realmente. `GET /sync/debug/search?subject=...` prueba las distintas estrategias de search y devuelve qué encuentra cada una.
 
 ## Comandos útiles
 
