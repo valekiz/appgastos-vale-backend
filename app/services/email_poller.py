@@ -214,8 +214,8 @@ class GmailPoller:
             f'-label:{self._processed_label}'
         )
         try:
-            # Encodear como bytes UTF-8 para evitar el error 'ascii' codec
-            quoted = f'"{gm_query}"'.encode('utf-8')
+            # Encodear como bytes UTF-8 (literal IMAP) — sin comillas extra que rompan la query
+            quoted = gm_query.encode('utf-8')
             status, data = conn.uid("SEARCH", "X-GM-RAW", quoted)
             if status == "OK" and data[0]:
                 return data[0].split()
