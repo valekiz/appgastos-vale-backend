@@ -61,6 +61,7 @@ from app.models.database import (
     CartolaProcesada, Categoria, MovimientoCC, get_session, init_db
 )
 from app.parsers.pdf_parser import CartolaCCParser, CartolaTCParser
+from app.parsers.itau_parser import CartolaITAUCCParser, CartolaITAUTCParser
 from app.services.email_poller import GmailPoller
 
 logger = logging.getLogger(__name__)
@@ -554,20 +555,23 @@ def sync_from_email(db: Session = Depends(_get_db)):
 
     procesados = []
 
-    # Senders aceptados: el banco + la propia cuenta del usuario (para emails reenviados a sí mismo)
+    # Senders Itaú: CC y TC vienen de remitentes distintos
     import os as _os
-    _bank_sender = _os.environ.get("GMAIL_SENDER", "mensajeria@santander.cl")
+    _cc_sender = _os.environ.get("GMAIL_SENDER", "Cartola@itau.cl")
+    _tc_sender = _os.environ.get("GMAIL_SENDER_TC", "itau@eeccvirtual.cl")
     _self_sender = _os.environ.get("GMAIL_USER", "")
-    _all_senders = [s for s in (_bank_sender, _self_sender) if s]
 
-    # ── Cartola CC ────────────────────────────────────────────────────────────
+    # ── Cartola CC (Estado de Cuenta Personal Itaú) ───────────────────────────
     try:
-        cc_poller = GmailPoller(sender_filter=_all_senders)
+        cc_poller = GmailPoller(
+            subject_filter=_os.environ.get("GMAIL_SUBJECT", "Cartola Cuenta y L"),
+            sender_filter=[s for s in (_cc_sender, _self_sender) if s],
+        )
         cc_raws = cc_poller.fetch_new()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error conectando a Gmail: {exc}")
 
-    cc_parser = CartolaCCParser(rut=rut)
+    cc_parser = CartolaITAUCCParser(password=rut)
     for raw in cc_raws:
         try:
             cartola = cc_parser.parse(raw.pdf_bytes)
@@ -585,19 +589,18 @@ def sync_from_email(db: Session = Depends(_get_db)):
             logger.error("Error procesando cartola CC UID %s: %s", raw.uid, exc)
             procesados.append({"uid": raw.uid, "tipo": "cc", "error": str(exc)})
 
-    # ── Estado TC ─────────────────────────────────────────────────────────────
+    # ── Estado TC (Tarjeta de Crédito Itaú) ───────────────────────────────────
     try:
-        # Substring ASCII para evitar problemas de encoding con acentos
         tc_poller = GmailPoller(
-            subject_filter="Estado de Cuenta Tarjeta de Cr",
-            sender_filter=_all_senders,
+            subject_filter=_os.environ.get("GMAIL_SUBJECT_TC", "Estado de cuenta tarjeta de credito Mastercard Itau"),
+            sender_filter=[s for s in (_tc_sender, _self_sender) if s],
         )
         tc_raws = tc_poller.fetch_new()
     except Exception as exc:
         logger.error("Error buscando emails TC: %s", exc)
         tc_raws = []
 
-    tc_parser = CartolaTCParser(rut=rut)
+    tc_parser = CartolaITAUTCParser(password=rut)
     for raw in tc_raws:
         try:
             cartola = tc_parser.parse(raw.pdf_bytes)
