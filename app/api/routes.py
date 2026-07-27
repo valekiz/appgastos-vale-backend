@@ -529,6 +529,30 @@ def debug_inbox(days: int = Query(60, le=365)):
         raise HTTPException(status_code=500, detail=f"Error conectando a Gmail: {exc}")
 
 
+@router.get("/sync/debug/fetch-uids")
+def debug_fetch_uids():
+    """Diagnóstico: corre el search real (con todos los fallbacks) y devuelve los UIDs encontrados."""
+    import os as _os
+    _cc_sender = _os.environ.get("GMAIL_SENDER", "Cartola@itau.cl")
+    _self_sender = _os.environ.get("GMAIL_USER", "")
+    subject = _os.environ.get("GMAIL_SUBJECT", "Cartola Cuenta")
+    try:
+        poller = GmailPoller(
+            subject_filter=subject,
+            sender_filter=[s for s in (_cc_sender, _self_sender) if s],
+        )
+        with poller._connect() as conn:
+            uids = poller._search_unprocessed(conn)
+        return {
+            "subject_filter": subject,
+            "senders": poller.sender_filters,
+            "uids_found": len(uids),
+            "uids": [u.decode() if isinstance(u, bytes) else u for u in uids],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.api_route("/health", methods=["GET", "HEAD"])
 def health(db: Session = Depends(_get_db)):
     """Healthcheck — soporta GET y HEAD (UptimeRobot free tier usa HEAD).
