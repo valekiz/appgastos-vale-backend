@@ -564,7 +564,7 @@ def sync_from_email(db: Session = Depends(_get_db)):
     # ── Cartola CC (Estado de Cuenta Personal Itaú) ───────────────────────────
     try:
         cc_poller = GmailPoller(
-            subject_filter=_os.environ.get("GMAIL_SUBJECT", "Cartola Cuenta y L"),
+            subject_filter=_os.environ.get("GMAIL_SUBJECT", "Cartola Cuenta"),
             sender_filter=[s for s in (_cc_sender, _self_sender) if s],
         )
         cc_raws = cc_poller.fetch_new()
