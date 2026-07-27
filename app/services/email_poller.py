@@ -193,95 +193,71 @@ class GmailPoller:
         return conn
 
     def _search_unprocessed(self, conn) -> list[bytes]:
-        """Busca UIDs de correos que:
-        - Tienen el asunto esperado
-        - Son del sender esperado
-        - NO tienen el label de procesado
-
-        Usa X-GM-RAW (extensión Gmail). Para manejar non-ASCII en el subject,
-        codifica el query como bytes UTF-8 (imaplib en string-mode falla con acentos).
+        """Busca UIDs de correos no procesados por sender, filtrando subject en Python.
+        Estrategia: FROM por cada sender → fetch de headers → match de subject en Python.
+        Evita X-GM-RAW (rompe la conexión IMAP al fallar el literal) y
+        X-GM-LABELS NOT (sintaxis IMAP inválida).
         """
-        # Sintaxis nativa de Gmail — maneja acentos correctamente.
-        # Si hay múltiples senders válidos (ej. banco + propia cuenta para re-envíos), usamos OR.
-        if len(self.sender_filters) == 1:
-            from_clause = f'from:{self.sender_filters[0]}'
-        else:
-            ors = " OR ".join(f'from:{s}' for s in self.sender_filters)
-            from_clause = f'({ors})'
-        gm_query = (
-            f'{from_clause} '
-            f'subject:"{self.subject_filter}" '
-            f'-label:{self._processed_label}'
-        )
-        try:
-            # Encodear como bytes UTF-8 (literal IMAP) — sin comillas extra que rompan la query
-            quoted = gm_query.encode('utf-8')
-            status, data = conn.uid("SEARCH", "X-GM-RAW", quoted)
-            if status == "OK" and data[0]:
-                return data[0].split()
-        except (imaplib.IMAP4.error, UnicodeEncodeError) as exc:
-            logger.warning("X-GM-RAW search falló: %s. Probando IMAP plano.", exc)
+        def _strip_acc(s: str) -> str:
+            return (s.replace('á','a').replace('é','e').replace('í','i')
+                     .replace('ó','o').replace('ú','u').replace('ñ','n'))
 
-        # Fallback 1: IMAP SEARCH normal por cada sender (puede fallar con acentos)
-        all_uids_set: set[bytes] = set()
-        for sender in self.sender_filters:
-            criteria = (
-                f'FROM "{sender}" '
-                f'SUBJECT "{self.subject_filter}" '
-                f'X-GM-LABELS NOT "{self._processed_label}"'
-            )
-            try:
-                status, data = conn.uid("SEARCH", None, criteria)
-                if status == "OK" and data[0]:
-                    all_uids_set.update(data[0].split())
-            except imaplib.IMAP4.error:
-                pass
-        if all_uids_set:
-            return sorted(all_uids_set)
+        # Tokens del subject que usamos para filtrar (len >= 3, sin stopwords)
+        _stopwords = {'mensual', 'cuentas.', 'de', 'y', 'la', 'el', 'las', 'los'}
+        expected_tokens = [
+            _strip_acc(t.lower()) for t in self.subject_filter.split()
+            if len(t) >= 3 and t.lower() not in _stopwords
+        ]
+        if not expected_tokens:
+            expected_tokens = [_strip_acc(self.subject_filter.lower())]
 
-        # Fallback 2: solo por sender(s), filtramos subject en Python después
+        # 1. Buscar UIDs por sender
         all_uids: list[bytes] = []
         seen: set[bytes] = set()
         for sender in self.sender_filters:
-            simple_criteria = f'FROM "{sender}"'
-            status, data = conn.uid("SEARCH", None, simple_criteria)
-            if status != "OK" or not data[0]:
-                continue
-            for uid in data[0].split():
-                if uid not in seen:
-                    seen.add(uid)
-                    all_uids.append(uid)
+            try:
+                status, data = conn.uid("SEARCH", None, f'FROM "{sender}"')
+                if status != "OK" or not data[0]:
+                    continue
+                for uid in data[0].split():
+                    if uid not in seen:
+                        seen.add(uid)
+                        all_uids.append(uid)
+            except imaplib.IMAP4.error:
+                pass
+
         if not all_uids:
             return []
-        # Filtramos por subject en Python para evitar problemas de encoding
+
+        # 2. Filtrar por subject y label de procesado via fetch de headers
         filtered = []
-        for uid in all_uids[-100:]:  # solo los últimos 100 para no demorar
+        for uid in all_uids[-200:]:
             try:
-                st, msg_data = conn.uid("FETCH", uid, "(BODY[HEADER.FIELDS (SUBJECT X-GM-LABELS)])")
-                if st != "OK":
+                st, msg_data = conn.uid("FETCH", uid, "(BODY[HEADER.FIELDS (SUBJECT)])")
+                if st != "OK" or not msg_data or not msg_data[0]:
                     continue
-                raw = msg_data[0][1]
-                if isinstance(raw, bytes):
-                    header_text = raw.decode("utf-8", errors="replace")
-                else:
-                    header_text = str(raw)
-                # Match flexible: tokens del subject_filter sin acentos
-                subj_lower = header_text.lower()
-                expected_tokens = [t.lower() for t in self.subject_filter.split()
-                                   if len(t) >= 4 and t.lower() not in {'mensual', 'cuentas.', 'de'}]
-                if not expected_tokens:
-                    expected_tokens = [self.subject_filter.lower()]
-                # Quitamos acentos para match más permisivo
-                def _strip_acc(s):
-                    return (s.replace('á','a').replace('é','e').replace('í','i')
-                             .replace('ó','o').replace('ú','u').replace('ñ','n'))
-                subj_norm = _strip_acc(subj_lower)
-                if all(_strip_acc(t) in subj_norm for t in expected_tokens):
-                    # Skip los que ya tienen el label de procesado
-                    if self._processed_label.lower() not in subj_lower:
-                        filtered.append(uid)
+                raw = msg_data[0][1] if isinstance(msg_data[0], tuple) else msg_data[0]
+                header_text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+                subj_norm = _strip_acc(header_text.lower())
+
+                # Match: todos los tokens esperados deben estar en el subject
+                if not all(t in subj_norm for t in expected_tokens):
+                    continue
+
+                # Verificar que no tiene el label de procesado via X-GM-LABELS fetch
+                try:
+                    st2, ldata = conn.uid("FETCH", uid, "(X-GM-LABELS)")
+                    if st2 == "OK" and ldata and ldata[0]:
+                        label_str = str(ldata[0]).lower()
+                        if self._processed_label.lower().replace('/', '') in label_str.replace('/', ''):
+                            continue  # ya procesado, saltar
+                except Exception:
+                    pass  # si falla el check de labels, incluimos igual (dedup en DB)
+
+                filtered.append(uid)
             except Exception:
                 continue
+
         return filtered
 
     def _fetch_cartola(self, conn, uid: bytes) -> RawCartola | None:
